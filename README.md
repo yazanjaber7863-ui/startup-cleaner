@@ -2,6 +2,7 @@
 
 A small, dark-themed Windows app for managing the programs that start with Windows - the same list Task Manager shows under **Startup apps**, but with a real **Remove** button.
 
+- **Add** any program, script or file so it starts automatically with Windows
 - **Remove** startup entries completely (not just disable them)
 - **Disable / Enable** them, exactly like Task Manager does
 - App icons and friendly names
@@ -12,6 +13,8 @@ A small, dark-themed Windows app for managing the programs that start with Windo
 1. Download or clone this repo.
 2. Double-click `StartupCleaner.cmd`.
 3. Accept the admin prompt (needed for entries that apply to all users).
+
+Click **+ Add app** to pick a program (optionally with arguments, and optionally for all users) and it will start with Windows from then on. `.exe` files are added to the `Run` registry key; scripts and other files get a shortcut in the Startup folder.
 
 Select one or more apps, then click **Disable / Enable** or **Remove** (or press `Delete`). The `...` menu has *Open file location*, *Open backups folder* and *Refresh*.
 

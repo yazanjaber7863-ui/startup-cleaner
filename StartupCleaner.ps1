@@ -229,6 +229,35 @@ function Set-EntryEnabled($e, [bool]$enabled) {
     }
 }
 
+# Make a program start with Windows. Executables go in the Run key; anything else
+# (scripts, documents, shortcuts) gets a shortcut in the Startup folder.
+function Add-Entry([string]$path, [string]$arguments, [bool]$allUsers) {
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw "File not found: $path" }
+    $hive = if ($allUsers) { 'HKLM' } else { 'HKCU' }
+    $name = Get-FriendlyName $path ([IO.Path]::GetFileNameWithoutExtension($path))
+
+    if ([IO.Path]::GetExtension($path) -eq '.exe') {
+        $key = "${hive}:\Software\Microsoft\Windows\CurrentVersion\Run"
+        if ($null -ne (Get-ItemProperty -Path $key -Name $name -ErrorAction SilentlyContinue)) {
+            throw "'$name' is already in the startup list."
+        }
+        $cmd = "`"$path`" $arguments".Trim()
+        New-ItemProperty -Path $key -Name $name -Value $cmd -PropertyType String -Force | Out-Null
+        Set-ApprovedState $hive 'Run' $name $true
+    } else {
+        $folder = [Environment]::GetFolderPath($(if ($allUsers) { 'CommonStartup' } else { 'Startup' }))
+        $lnkPath = Join-Path $folder "$name.lnk"
+        if (Test-Path -LiteralPath $lnkPath) { throw "'$name' is already in the startup list." }
+        $lnk = (New-Object -ComObject WScript.Shell).CreateShortcut($lnkPath)
+        $lnk.TargetPath = $path
+        $lnk.Arguments = $arguments
+        $lnk.WorkingDirectory = Split-Path $path -Parent
+        $lnk.Save()
+        Set-ApprovedState $hive 'StartupFolder' "$name.lnk" $true
+    }
+    $name
+}
+
 # ---------------- UI ----------------
 
 Add-Type -Namespace Native -Name Dwm -MemberDefinition @'
@@ -379,6 +408,8 @@ function New-Button($text, $back, $hover) {
 }
 $btnToggle = New-Button 'Disable' (Rgb '#3a3a3a') (Rgb '#454545')
 $btnRemove = New-Button 'Remove' $C.Danger $C.DangerHi
+$btnAdd    = New-Button '+  Add app' $C.Accent (Rgb '#7bd6ff')
+$btnAdd.ForeColor = Rgb '#000000'
 $btnMore   = New-Button '...' $C.Surface (Rgb '#3a3a3a')
 $btnMore.Size = New-Object System.Drawing.Size(40, 34)
 
@@ -386,7 +417,8 @@ $layoutBar = {
     $y = ($bar.Height - 34) / 2
     $btnRemove.Location = New-Object System.Drawing.Point(($bar.Width - 24 - $btnRemove.Width), $y)
     $btnToggle.Location = New-Object System.Drawing.Point(($btnRemove.Left - 8 - $btnToggle.Width), $y)
-    $btnMore.Location   = New-Object System.Drawing.Point(20, $y)
+    $btnAdd.Location    = New-Object System.Drawing.Point(24, $y)
+    $btnMore.Location   = New-Object System.Drawing.Point(($btnAdd.Right + 8), $y)
 }
 $bar.Add_Resize($layoutBar)
 
@@ -494,6 +526,94 @@ $miBackups.Add_Click({
     Start-Process explorer.exe $BackupDir
 })
 $miRefresh.Add_Click({ Load-Grid })
+
+function Show-AddDialog([string]$path) {
+    $dlg = New-Object System.Windows.Forms.Form
+    $dlg.Text = 'Add startup app'
+    $dlg.ClientSize = New-Object System.Drawing.Size(460, 250)
+    $dlg.FormBorderStyle = 'FixedDialog'
+    $dlg.MaximizeBox = $false
+    $dlg.MinimizeBox = $false
+    $dlg.ShowInTaskbar = $false
+    $dlg.StartPosition = 'CenterParent'
+    $dlg.BackColor = $C.Bg
+    $dlg.ForeColor = $C.Text
+    $dlg.Font = $FontBody
+    $dlg.Add_HandleCreated({ $on = 1; [void][Native.Dwm]::DwmSetWindowAttribute($dlg.Handle, 20, [ref]$on, 4) })
+
+    function New-Label($text, $y) {
+        $l = New-Object System.Windows.Forms.Label
+        $l.Text = $text; $l.AutoSize = $true; $l.ForeColor = $C.Muted; $l.Font = $FontSmall
+        $l.Location = New-Object System.Drawing.Point(24, $y)
+        $dlg.Controls.Add($l)
+    }
+    function New-TextBox($y, $width) {
+        $t = New-Object System.Windows.Forms.TextBox
+        $t.BorderStyle = 'FixedSingle'; $t.BackColor = $C.Surface; $t.ForeColor = $C.Text
+        $t.Location = New-Object System.Drawing.Point(24, $y); $t.Width = $width
+        $dlg.Controls.Add($t)
+        $t
+    }
+
+    New-Label 'Program or file' 20
+    $txtPath = New-TextBox 42 316
+    $txtPath.Text = $path
+    $btnBrowse = New-Object System.Windows.Forms.Button
+    $btnBrowse.Text = 'Browse...'; $btnBrowse.FlatStyle = 'Flat'; $btnBrowse.FlatAppearance.BorderSize = 0
+    $btnBrowse.BackColor = Rgb '#3a3a3a'; $btnBrowse.Size = New-Object System.Drawing.Size(88, 27)
+    $btnBrowse.Location = New-Object System.Drawing.Point(348, 41)
+    $dlg.Controls.Add($btnBrowse)
+    $btnBrowse.Add_Click({
+        $ofd = New-Object System.Windows.Forms.OpenFileDialog
+        $ofd.Title = 'Choose a program to start with Windows'
+        $ofd.Filter = 'Programs (*.exe)|*.exe|Scripts and shortcuts (*.bat;*.cmd;*.ps1;*.lnk;*.vbs)|*.bat;*.cmd;*.ps1;*.lnk;*.vbs|All files (*.*)|*.*'
+        $ofd.InitialDirectory = $env:ProgramFiles
+        if ($ofd.ShowDialog($dlg) -eq 'OK') { $txtPath.Text = $ofd.FileName }
+    })
+
+    New-Label 'Arguments (optional)' 84
+    $txtArgs = New-TextBox 106 412
+
+    $chkAll = New-Object System.Windows.Forms.CheckBox
+    $chkAll.Text = 'Start for all users on this PC'
+    $chkAll.AutoSize = $true
+    $chkAll.Location = New-Object System.Drawing.Point(24, 148)
+    $dlg.Controls.Add($chkAll)
+
+    $ok = New-Object System.Windows.Forms.Button
+    $ok.Text = 'Add'; $ok.FlatStyle = 'Flat'; $ok.FlatAppearance.BorderSize = 0
+    $ok.BackColor = $C.Accent; $ok.ForeColor = Rgb '#000000'
+    $ok.Size = New-Object System.Drawing.Size(100, 34)
+    $ok.Location = New-Object System.Drawing.Point(228, 196)
+    $cancel = New-Object System.Windows.Forms.Button
+    $cancel.Text = 'Cancel'; $cancel.FlatStyle = 'Flat'; $cancel.FlatAppearance.BorderSize = 0
+    $cancel.BackColor = Rgb '#3a3a3a'; $cancel.DialogResult = 'Cancel'
+    $cancel.Size = New-Object System.Drawing.Size(100, 34)
+    $cancel.Location = New-Object System.Drawing.Point(336, 196)
+    $dlg.Controls.AddRange([System.Windows.Forms.Control[]]@($ok, $cancel))
+    $dlg.AcceptButton = $ok
+    $dlg.CancelButton = $cancel
+
+    $ok.Add_Click({
+        try {
+            $name = Add-Entry $txtPath.Text.Trim().Trim('"') $txtArgs.Text.Trim() $chkAll.Checked
+            $script:addedName = $name
+            $dlg.DialogResult = 'OK'
+        } catch {
+            [void][System.Windows.Forms.MessageBox]::Show($dlg, $_.Exception.Message, 'Could not add app', 'OK', 'Error')
+        }
+    })
+
+    if (-not $path) { $dlg.Add_Shown({ $btnBrowse.PerformClick() }) }
+    if ($dlg.ShowDialog($form) -eq 'OK') {
+        Load-Grid
+        # Select the new entry so it's easy to spot.
+        foreach ($row in $grid.Rows) { if ($row.Tag.Name -eq $script:addedName) { $row.Selected = $true; $grid.FirstDisplayedScrollingRowIndex = $row.Index } }
+    }
+    $dlg.Dispose()
+}
+
+$btnAdd.Add_Click({ Show-AddDialog '' })
 $grid.Add_KeyDown({ if ($_.KeyCode -eq 'Delete' -and $btnRemove.Enabled) { $btnRemove.PerformClick() } })
 # Clicking empty space clears the selection.
 $grid.Add_MouseDown({ param($s, $ev)
